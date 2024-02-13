@@ -40,7 +40,8 @@ import (
 
 const (
 	setupKeyOutputName = "sa_key"
-	tftCacheMutexFilename  = "/tmp/bpt-tft-cache.lock"
+	tftCacheMutexFilename  = "bpt-tft-cache.lock"
+	vetFilename = "plan.tfplan"
 )
 
 var (
@@ -179,9 +180,9 @@ func NewTFBlueprintTest(t testing.TB, opts ...tftOption) *TFBlueprintTest {
 		t:         t,
 	}
 	// initiate tft cache file mutex
-	tft.tftCacheMutex, err = filemutex.New(tftCacheMutexFilename)
+	tft.tftCacheMutex, err = filemutex.New(filepath.Join(os.TempDir(), tftCacheMutexFilename))
 	if err != nil {
-		t.Fatalf("tft lock file <%s> could not created: %v", tftCacheMutexFilename, err)
+		t.Fatalf("tft lock file <%s> could not created: %v", filepath.Join(os.TempDir(), tftCacheMutexFilename), err)
 	}
 	// default TF blueprint methods
 	tft.init = tft.DefaultInit
@@ -360,6 +361,15 @@ func (b *TFBlueprintTest) GetTFSetupOutputListVal(key string) []string {
 	if b.setupDir == "" {
 		b.t.Fatal("Setup path not set")
 	}
+	// allow only parallel reads as Terraform plugin cache isn't concurrent safe
+	if err := b.tftCacheMutex.RLock(); err != nil {
+		b.t.Fatalf("Could not acquire read lock: %v", err)
+	}
+	defer func() {
+		if err := b.tftCacheMutex.RUnlock(); err != nil {
+			b.t.Fatalf("Could not release read lock: %v", err)
+		}
+	}()
 	return terraform.OutputList(b.t, &terraform.Options{TerraformDir: b.setupDir, Logger: b.logger, NoColor: true}, key)
 }
 
@@ -372,6 +382,15 @@ func (b *TFBlueprintTest) GetTFSetupStringOutput(key string) string {
 	if b.setupDir == "" {
 		b.t.Fatal("Setup path not set")
 	}
+	// allow only parallel reads as Terraform plugin cache isn't concurrent safe
+	if err := b.tftCacheMutex.RLock(); err != nil {
+		b.t.Fatalf("Could not acquire read lock: %v", err)
+	}
+	defer func() {
+		if err := b.tftCacheMutex.RUnlock(); err != nil {
+			b.t.Fatalf("Could not release read lock: %v", err)
+		}
+	}()
 	return terraform.Output(b.t, &terraform.Options{TerraformDir: b.setupDir, Logger: b.logger, NoColor: true}, key)
 }
 
@@ -469,8 +488,14 @@ func (b *TFBlueprintTest) DefaultInit(assert *assert.Assertions) {
 
 // Vet runs TF plan, TF show, and gcloud terraform vet on a blueprint.
 func (b *TFBlueprintTest) Vet(assert *assert.Assertions) {
+	vetTempDir, err := os.MkdirTemp(os.TempDir(), "btp")
+	if err != nil {
+		b.t.Fatalf("Temp directory <%s> could not created: %v", vetTempDir, err)
+	}
+	defer os.RemoveAll(vetTempDir)
+
 	localOptions := b.GetTFOptions()
-	localOptions.PlanFilePath = filepath.Join(os.TempDir(), "plan.tfplan")
+	localOptions.PlanFilePath = filepath.Join(vetTempDir, vetFilename)
 	terraform.Plan(b.t, localOptions)
 	jsonPlan := terraform.Show(b.t, localOptions)
 	filepath, err := utils.WriteTmpFileWithExtension(jsonPlan, "json")
